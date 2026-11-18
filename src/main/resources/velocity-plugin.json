@@ -1,0 +1,14 @@
+{
+  "id": "mcrw-return",
+  "name": "MCRW-Return",
+  "version": "1.0.0",
+  "description": "Returns players to their last server after AuthMe login",
+  "authors": ["novrom1982"],
+  "dependencies": [
+    {
+      "id": "authmevelocity",
+      "optional": false
+    }
+  ],
+  "main": "ru.mcrealworld.mcrwreturn.MCRWReturn"
+}
