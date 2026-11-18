@@ -1,16 +1,16 @@
 package ru.mcrealworld.mcrwreturn;
 
 import com.google.inject.Inject;
+import com.velocitypowered.api.command.CommandManager;
+import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
-import com.velocitypowered.api.plugin.Dependency;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
-import io.github._4drian3d.authmevelocity.api.velocity.event.ProxyLoginEvent;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -28,10 +28,7 @@ import java.util.UUID;
         name = "MCRW-Return",
         version = "1.0.1",
         description = "Возврат игроков MC Real World на последний игровой сервер после авторизации",
-        authors = {"novrom1982"},
-        dependencies = {
-                @Dependency(id = "authmevelocity")
-        }
+        authors = {"novrom1982"}
 )
 public class MCRWReturn {
 
@@ -52,7 +49,12 @@ public class MCRWReturn {
     @Subscribe
     public void onProxyInitialization(ProxyInitializeEvent event) {
         loadData();
-        logger.info("MCRW-Return v1.0.1 успешно запущен (режим API AuthMeVelocity). Загружено записей: {}", lastServers.size());
+        CommandManager commandManager = server.getCommandManager();
+        commandManager.register(
+                commandManager.metaBuilder("mcrwreturn").plugin(this).build(),
+                new ReturnCommand()
+        );
+        logger.info("MCRW-Return v1.0.1 успешно запущен. Загружено записей: {}", lastServers.size());
     }
 
     @Subscribe
@@ -72,11 +74,8 @@ public class MCRWReturn {
         }
     }
 
-    @Subscribe
-    public void onProxyLogin(ProxyLoginEvent event) {
-        Player player = event.player();
+    private void sendToLastServer(Player player) {
         String targetServerName = lastServers.getProperty(player.getUniqueId().toString());
-
         if (targetServerName == null || targetServerName.isBlank() || targetServerName.equalsIgnoreCase(AUTH_SERVER_NAME)) {
             return;
         }
@@ -97,7 +96,16 @@ public class MCRWReturn {
                     player.createConnectionRequest(targetServer.get()).fireAndForget();
                 }
             });
-        }).delay(Duration.ofMillis(250)).schedule();
+        }).delay(Duration.ofMillis(200)).schedule();
+    }
+
+    private class ReturnCommand implements SimpleCommand {
+        @Override
+        public void execute(Invocation invocation) {
+            if (invocation.source() instanceof Player player) {
+                sendToLastServer(player);
+            }
+        }
     }
 
     private synchronized void loadData() {
