@@ -141,7 +141,7 @@ public class MCRWReturn {
         try {
             Files.createDirectories(dataFile.getParent());
             try (OutputStream os = Files.newOutputStream(dataFile)) {
-                storage.store(os, "MC Real World - Last Server Storage");
+                storage.store(os, "MCRW-Return - Last Server Storage");
             }
         } catch (IOException e) {
             logger.error("Ошибка сохранения players.properties", e);
