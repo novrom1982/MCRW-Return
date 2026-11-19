@@ -6,7 +6,9 @@ import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
+import com.velocitypowered.api.plugin.Dependency;
 import com.velocitypowered.api.plugin.Plugin;
+import com.velocitypowered.api.plugin.PluginContainer;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -16,19 +18,26 @@ import org.slf4j.Logger;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Properties;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Plugin(
         id = "mcrw-return",
         name = "MCRW-Return",
-        version = "1.0.1",
+        version = "1.0.0",
         description = "Возврат игроков MC Real World на последний игровой сервер после авторизации",
-        authors = {"novrom1982"}
+        authors = {"novrom1982"},
+        dependencies = {
+                @Dependency(id = "authmevelocity", optional = true)
+        }
 )
 public class MCRWReturn {
 
@@ -38,6 +47,9 @@ public class MCRWReturn {
     private final Logger logger;
     private final Path dataFile;
     private final Properties lastServers = new Properties();
+
+    private Object authStore;
+    private Method isLoggedMethod;
 
     @Inject
     public MCRWReturn(ProxyServer server, Logger logger, @DataDirectory Path dataDirectory) {
@@ -49,12 +61,103 @@ public class MCRWReturn {
     @Subscribe
     public void onProxyInitialization(ProxyInitializeEvent event) {
         loadData();
+        hookAuthMeVelocity();
+
         CommandManager commandManager = server.getCommandManager();
         commandManager.register(
                 commandManager.metaBuilder("mcrwreturn").plugin(this).build(),
                 new ReturnCommand()
         );
-        logger.info("MCRW-Return v1.0.1 успешно запущен. Загружено записей: {}", lastServers.size());
+        logger.info("MCRW-Return v1.0.0 успешно запущен. Загружено записей: {}", lastServers.size());
+    }
+
+    private void hookAuthMeVelocity() {
+        Optional<PluginContainer> pluginOpt = server.getPluginManager().getPlugin("authmevelocity");
+        if (pluginOpt.isEmpty() || pluginOpt.get().getInstance().isEmpty()) {
+            logger.warn("Плагин authmevelocity не найден! Автоматический перехват логина недоступен.");
+            return;
+        }
+
+        Object pluginInstance = pluginOpt.get().getInstance().get();
+        try {
+            // 1. Ищем VelocityAuthenticationStore на 1-м и 2-м уровнях вложенности
+            authStore = findAuthStore(pluginInstance, 2);
+
+            if (authStore == null) {
+                logger.warn("Не удалось найти VelocityAuthenticationStore. Поля AuthMeVelocityPlugin:");
+                Class<?> c = pluginInstance.getClass();
+                while (c != null && c != Object.class) {
+                    for (Field f : c.getDeclaredFields()) {
+                        logger.warn(" - {} : {}", f.getName(), f.getType().getName());
+                    }
+                    c = c.getSuperclass();
+                }
+                return;
+            }
+
+            for (Method method : authStore.getClass().getDeclaredMethods()) {
+                if (method.getReturnType() == boolean.class
+                        && method.getParameterCount() == 1
+                        && method.getParameterTypes()[0] == String.class) {
+                    String name = method.getName().toLowerCase(Locale.ROOT);
+                    if (name.contains("logged") || name.contains("auth")) {
+                        method.setAccessible(true);
+                        isLoggedMethod = method;
+                        break;
+                    }
+                }
+            }
+
+            if (isLoggedMethod != null) {
+                logger.info("Успешно подключён перехват авторизации AuthMeVelocity (метод: {})", isLoggedMethod.getName());
+            } else {
+                logger.warn("Найден VelocityAuthenticationStore, но не найден метод проверки. Declared-методы:");
+                for (Method m : authStore.getClass().getDeclaredMethods()) {
+                    logger.warn(" - {}({}) -> {}", m.getName(), java.util.Arrays.toString(m.getParameterTypes()), m.getReturnType().getSimpleName());
+                }
+            }
+        } catch (Exception e) {
+            logger.error("Ошибка при подключении к AuthMeVelocity", e);
+        }
+    }
+
+    private Object findAuthStore(Object target, int depth) {
+        if (target == null || depth < 0) {
+            return null;
+        }
+        if (target.getClass().getName().endsWith("VelocityAuthenticationStore")) {
+            return target;
+        }
+        Class<?> clazz = target.getClass();
+        while (clazz != null && clazz != Object.class) {
+            for (Field field : clazz.getDeclaredFields()) {
+                try {
+                    field.setAccessible(true);
+                    Object value = field.get(target);
+                    if (value != null && value.getClass().getName().startsWith("fr.xephi.authme")) {
+                        Object found = findAuthStore(value, depth - 1);
+                        if (found != null) {
+                            return found;
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+            clazz = clazz.getSuperclass();
+        }
+        return null;
+    }
+
+    private boolean isPlayerAuthenticated(String username) {
+        if (authStore == null || isLoggedMethod == null) {
+            return false;
+        }
+        try {
+            Object res = isLoggedMethod.invoke(authStore, username.toLowerCase(Locale.ROOT));
+            return Boolean.TRUE.equals(res);
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     @Subscribe
@@ -63,6 +166,7 @@ public class MCRWReturn {
         String serverName = event.getServer().getServerInfo().getName();
 
         if (serverName.equalsIgnoreCase(AUTH_SERVER_NAME)) {
+            startAuthWatcher(player);
             return;
         }
 
@@ -72,6 +176,32 @@ public class MCRWReturn {
             lastServers.setProperty(uuid.toString(), serverName);
             saveData();
         }
+    }
+
+    private void startAuthWatcher(Player player) {
+        String targetServerName = lastServers.getProperty(player.getUniqueId().toString());
+        if (targetServerName == null || targetServerName.isBlank() || targetServerName.equalsIgnoreCase(AUTH_SERVER_NAME)) {
+            return;
+        }
+
+        AtomicInteger attempts = new AtomicInteger(0);
+        server.getScheduler().buildTask(this, task -> {
+            if (!player.isActive() || attempts.incrementAndGet() > 240) {
+                task.cancel();
+                return;
+            }
+
+            Optional<String> currentServer = player.getCurrentServer().map(s -> s.getServerInfo().getName());
+            if (currentServer.isEmpty() || !currentServer.get().equalsIgnoreCase(AUTH_SERVER_NAME)) {
+                task.cancel();
+                return;
+            }
+
+            if (isPlayerAuthenticated(player.getUsername())) {
+                task.cancel();
+                sendToLastServer(player);
+            }
+        }).delay(Duration.ofMillis(300)).repeat(Duration.ofMillis(250)).schedule();
     }
 
     private void sendToLastServer(Player player) {
@@ -86,17 +216,12 @@ public class MCRWReturn {
             return;
         }
 
-        server.getScheduler().buildTask(this, () -> {
-            if (!player.isActive()) {
-                return;
+        player.getCurrentServer().ifPresent(current -> {
+            if (current.getServerInfo().getName().equalsIgnoreCase(AUTH_SERVER_NAME)) {
+                logger.info("Возвращаем игрока {} на последний сервер: {}", player.getUsername(), targetServerName);
+                player.createConnectionRequest(targetServer.get()).fireAndForget();
             }
-            player.getCurrentServer().ifPresent(current -> {
-                if (current.getServerInfo().getName().equalsIgnoreCase(AUTH_SERVER_NAME)) {
-                    logger.info("Возвращаем игрока {} на последний сервер: {}", player.getUsername(), targetServerName);
-                    player.createConnectionRequest(targetServer.get()).fireAndForget();
-                }
-            });
-        }).delay(Duration.ofMillis(200)).schedule();
+        });
     }
 
     private class ReturnCommand implements SimpleCommand {
