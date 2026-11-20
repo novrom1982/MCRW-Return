@@ -4,6 +4,7 @@ import com.google.inject.Inject;
 import com.velocitypowered.api.command.CommandManager;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.event.Subscribe;
+import com.velocitypowered.api.event.connection.DisconnectEvent;
 import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.plugin.Dependency;
@@ -26,13 +27,15 @@ import java.time.Duration;
 import java.util.Locale;
 import java.util.Optional;
 import java.util.Properties;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Plugin(
         id = "mcrw-return",
         name = "MCRW-Return",
-        version = "1.0.0",
+        version = "1.0.1",
         description = "Возврат игроков MC Real World на последний игровой сервер после авторизации",
         authors = {"novrom1982"},
         dependencies = {
@@ -47,6 +50,7 @@ public class MCRWReturn {
     private final Logger logger;
     private final Path dataFile;
     private final Properties lastServers = new Properties();
+    private final Set<UUID> handledSessions = ConcurrentHashMap.newKeySet();
 
     private Object authStore;
     private Method isLoggedMethod;
@@ -68,7 +72,7 @@ public class MCRWReturn {
                 commandManager.metaBuilder("mcrwreturn").plugin(this).build(),
                 new ReturnCommand()
         );
-        logger.info("MCRW-Return v1.0.0 успешно запущен. Загружено записей: {}", lastServers.size());
+        logger.info("MCRW-Return v1.0.1 успешно запущен. Загружено записей: {}", lastServers.size());
     }
 
     private void hookAuthMeVelocity() {
@@ -80,18 +84,9 @@ public class MCRWReturn {
 
         Object pluginInstance = pluginOpt.get().getInstance().get();
         try {
-            // 1. Ищем VelocityAuthenticationStore на 1-м и 2-м уровнях вложенности
             authStore = findAuthStore(pluginInstance, 2);
-
             if (authStore == null) {
-                logger.warn("Не удалось найти VelocityAuthenticationStore. Поля AuthMeVelocityPlugin:");
-                Class<?> c = pluginInstance.getClass();
-                while (c != null && c != Object.class) {
-                    for (Field f : c.getDeclaredFields()) {
-                        logger.warn(" - {} : {}", f.getName(), f.getType().getName());
-                    }
-                    c = c.getSuperclass();
-                }
+                logger.warn("Не удалось найти VelocityAuthenticationStore.");
                 return;
             }
 
@@ -111,16 +106,12 @@ public class MCRWReturn {
             if (isLoggedMethod != null) {
                 logger.info("Успешно подключён перехват авторизации AuthMeVelocity (метод: {})", isLoggedMethod.getName());
             } else {
-                logger.warn("Найден VelocityAuthenticationStore, но не найден метод проверки. Declared-методы:");
-                for (Method m : authStore.getClass().getDeclaredMethods()) {
-                    logger.warn(" - {}({}) -> {}", m.getName(), java.util.Arrays.toString(m.getParameterTypes()), m.getReturnType().getSimpleName());
-                }
+                logger.warn("Найден VelocityAuthenticationStore, но не найден метод проверки.");
             }
         } catch (Exception e) {
             logger.error("Ошибка при подключении к AuthMeVelocity", e);
         }
     }
-
     private Object findAuthStore(Object target, int depth) {
         if (target == null || depth < 0) {
             return null;
@@ -163,19 +154,31 @@ public class MCRWReturn {
     @Subscribe
     public void onServerConnected(ServerConnectedEvent event) {
         Player player = event.getPlayer();
+        UUID uuid = player.getUniqueId();
         String serverName = event.getServer().getServerInfo().getName();
 
         if (serverName.equalsIgnoreCase(AUTH_SERVER_NAME)) {
-            startAuthWatcher(player);
+            if (event.getPreviousServer().isPresent()) {
+                handledSessions.add(uuid);
+                return;
+            }
+            if (handledSessions.add(uuid)) {
+                startAuthWatcher(player);
+            }
             return;
         }
 
-        UUID uuid = player.getUniqueId();
+        handledSessions.add(uuid);
         String previous = lastServers.getProperty(uuid.toString());
         if (!serverName.equals(previous)) {
             lastServers.setProperty(uuid.toString(), serverName);
             saveData();
         }
+    }
+
+    @Subscribe
+    public void onDisconnect(DisconnectEvent event) {
+        handledSessions.remove(event.getPlayer().getUniqueId());
     }
 
     private void startAuthWatcher(Player player) {
